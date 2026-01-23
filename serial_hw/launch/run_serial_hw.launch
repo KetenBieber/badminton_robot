@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<launch>
+
+  <arg name="serial_port" default="/dev/ttyACM1"/>
+
+  <node pkg="serial_hw" name="serial_hw_node" type="serial_hw_node">
+      <param name="serial_port" value="$(arg serial_port)"/>
+  </node>
+
+
+</launch>
