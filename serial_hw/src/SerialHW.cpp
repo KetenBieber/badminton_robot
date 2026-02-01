@@ -16,6 +16,26 @@
 
 namespace serial_hw {
 
+// 析构，释放线程
+SerialHW::~SerialHW() {
+  // 释放发送线程
+  if (send_thread_.joinable()) {
+    send_thread_.join();
+  }
+  if (read_thread_.joinable()) {
+    read_thread_.join();
+  }
+  if (unpack_thread_.joinable()) {
+    unpack_thread_.join();
+  }
+  // 关闭串口资源
+  if (serial_.isOpen()) {
+    serial_.close();
+  }
+
+  delete rb_;
+}
+
 bool SerialHW::init(ros::NodeHandle &nh) {
 
   nh_ = nh;
@@ -31,7 +51,7 @@ bool SerialHW::init(ros::NodeHandle &nh) {
 
     serial_.setPort(serial_port);
     serial_.setBaudrate(115200);
-    serial::Timeout time_out = serial::Timeout::simpleTimeout(100);
+    serial::Timeout time_out = serial::Timeout::simpleTimeout(10);
     serial_.setTimeout(time_out);
     serial_.open();
     serial_.flushInput();
@@ -78,18 +98,42 @@ bool SerialHW::init(ros::NodeHandle &nh) {
     delta_msg_.data[10] = 0xFD; // footer1
     delta_msg_.data[11] = 0xFE; // footer2
 
+    // imu消息id为4
+    imu_msg_.data.resize(20, 0); // 8+4+4+4
+    // 填充消息头
+    imu_msg_.data[0] = 0xFC; // header1
+    imu_msg_.data[1] = 0xFB; // header2
+    imu_msg_.data[2] = 0x04; // ID
+    imu_msg_.data[3] = 4;    // Data length = 4*1
+
+    // 填充消息尾
+    imu_msg_.data[16] = 0x00; // CRC placeholder
+    imu_msg_.data[17] = 0x00; // CRC placeholder
+    imu_msg_.data[18] = 0xFD; // footer1
+    imu_msg_.data[19] = 0xFE; // footer2
+
     // 注册订阅者
     cmd_vel_sub_ =
         nh_.subscribe("/cmd_vel", 10, &SerialHW::cmdVelCallback, this);
     action_sub_ = nh_.subscribe("/action", 10, &SerialHW::actionCallback, this);
     delta_sub_ = nh_.subscribe("/delta", 10, &SerialHW::deltaCallback, this);
+    imu_sub_ = nh_.subscribe("/odom", 10, &SerialHW::imuCallback, this);
+
+    // 注册发布者
+    action_pub_ = nh_.advertise<std_msgs::Int8>("/board_action", 10);
+    imu_debug_pub_ = nh_.advertise<std_msgs::Float32>("/debug_imu", 10);
+
+    /* ringbuffer */
+    rb_ = new RingBuffer(128); // 128byte
 
     /* signal handler */
     signal_handler::SignalHandler::bindAll(&SerialHW::handleSignal, this);
 
     /* thread init */
     is_running_ = true;
-    send_thread_ = std::thread(&SerialHW::sendThreadLoop, this);
+    send_thread_ = std::thread(&SerialHW::sendThreadLoop, this); // 发送线程
+    read_thread_ = std::thread(&SerialHW::readThreadLoop, this); // 读取线程
+    unpack_thread_ = std::thread(&SerialHW::unpackThreadLoop, this);
 
     ROS_INFO("SerialHW initialized successfully");
 
@@ -131,8 +175,17 @@ void SerialHW::sendThreadLoop() {
       }
     }
 
+    if (!has_msg) {
+      std::lock_guard<std::mutex> lock(imu_mutex_);
+      if (!imu_queue_.empty()) {
+        send_msg = imu_queue_.front();
+        imu_queue_.pop();
+        has_msg = true;
+      }
+    }
+
     if (has_msg) {
-      // 发送消息（在锁外执行）
+      // 发送消息，在try-catch块中完成
       try {
         serial_.flushOutput();
         serial_.write(send_msg.data.data(), send_msg.data.size());
@@ -146,6 +199,54 @@ void SerialHW::sendThreadLoop() {
       std::unique_lock<std::mutex> lock(send_cv_mutex_);
       msg_cv_.wait_for(lock, std::chrono::milliseconds(1000),
                        [this] { return is_running_ == false; });
+    }
+  }
+}
+
+void SerialHW::readThreadLoop() {
+  uint8_t buf[128];
+  while (is_running_) {
+    try {
+      if (serial_.waitReadable()) {
+        // 有数据才读，避免cpu空转
+        size_t n = serial_.read(buf, sizeof(buf));
+        if (n > 0) {
+          // 写入环形缓冲区
+          size_t written = rb_->write(buf, n);
+          unpack_cv_.notify_one(); // 通知解包线程
+          if (written < n) {
+            // 缓冲区写满了，只写了部分数据
+            std::cerr << "ringbuffer is full!" << std::endl;
+          }
+        }
+      } else {
+        // skip
+      }
+
+    } catch (const serial::IOException &e) {
+      std::cerr << "[serial_hw]: serial port error!" << e.what() << std::endl;
+    } catch (const std::exception &e) {
+      std::cerr << "[serial_hw]: other error!" << e.what() << std::endl;
+    }
+  }
+}
+
+void SerialHW::unpackThreadLoop() {
+  uint8_t buf[128];
+  while (is_running_) {
+    std::unique_lock<std::mutex> lock(rb_mutex_);
+    unpack_cv_.wait(lock,
+                    [this]() { return rb_->available() > 0 || !is_running_; });
+
+    if (!is_running_)
+      break;
+    size_t available = rb_->available();
+    if (available > 0) {
+      size_t len = std::min(available, sizeof(buf));
+      rb_->read(buf, len);
+
+      // 解包
+      unpack(buf, len);
     }
   }
 }
@@ -185,7 +286,7 @@ void SerialHW::actionCallback(const move_control::ActionMsg::ConstPtr &msg) {
 
 void SerialHW::deltaCallback(const std_msgs::Float32::ConstPtr &msg) {
   SerialMessage new_msg = delta_msg_;
-  delta_msg_.timestamp = ros::Time::now();
+  new_msg.timestamp = ros::Time::now();
 
   float delta = msg->data;
   memcpy(new_msg.data.data() + 4, &delta, 4);
@@ -197,18 +298,164 @@ void SerialHW::deltaCallback(const std_msgs::Float32::ConstPtr &msg) {
   msg_cv_.notify_one(); // 立即唤醒发送线程
 }
 
+void SerialHW::imuCallback(const nav_msgs::Odometry::ConstPtr &msg) {
+  SerialMessage new_msg = imu_msg_;
+  tf2::Quaternion cur_q(
+      msg->pose.pose.orientation.x, msg->pose.pose.orientation.y,
+      msg->pose.pose.orientation.z, msg->pose.pose.orientation.w);
+  double cur_roll, cur_pitch, cur_yaw;
+  tf2::Matrix3x3(cur_q).getRPY(cur_roll, cur_pitch, cur_yaw);
+
+  float yaw = static_cast<float>(cur_yaw);
+  std_msgs::Float32 debug_imu;
+  debug_imu.data = yaw;
+  imu_debug_pub_.publish(debug_imu);
+
+  float pos_x = static_cast<float>(msg->pose.pose.position.x);
+  float pos_y = static_cast<float>(msg->pose.pose.position.y);
+
+  memcpy(new_msg.data.data() + 4, &yaw, 4);
+  memcpy(new_msg.data.data() + 8, &pos_x, 4);
+  memcpy(new_msg.data.data() + 12, &pos_y, 4);
+
+  {
+    std::lock_guard<std::mutex> lock(imu_mutex_);
+    imu_queue_.push(new_msg);
+  }
+  msg_cv_.notify_one(); // 唤醒发送线程
+}
+
 void SerialHW::handleSignal(int /* signum */) {
   is_running_ = false;
   msg_cv_.notify_one();
+  unpack_cv_.notify_one();
   if (send_thread_.joinable()) {
     send_thread_.join();
+  }
+  if (read_thread_.joinable()) {
+    read_thread_.join();
+  }
+  if (unpack_thread_.joinable()) {
+    unpack_thread_.join();
+  }
+
+  if (serial_.isOpen()) {
+    serial_.close();
   }
 
   ros::shutdown();
   ROS_INFO("exit serial_hw node!");
 }
 
-// 解析接收到的数据
-void SerialHW::unpack() {}
+// 解析数据状态机
+void SerialHW::unpack(const uint8_t *buf, size_t len) {
+
+  static UnpackStatus state = UnpackStatus::CHECK_HEAD;
+
+  static std::vector<uint8_t> packet; // 用于存储当前正在解析的数据包
+  static uint8_t msg_id = 0;
+  static uint8_t data_length = 0;
+  static uint16_t crc = 0;
+
+  for (size_t i = 0; i < len; ++i) {
+    uint8_t byte = buf[i];
+    switch (state) {
+    case UnpackStatus::CHECK_HEAD: {
+      if (byte == 0xFC && i + 1 < len && buf[i + 1] == 0xFB) {
+        packet.clear();
+        packet.push_back(byte);
+        packet.push_back(buf[++i]);
+        state = UnpackStatus::CHECK_ID;
+      }
+      break;
+    }
+    case UnpackStatus::CHECK_ID: {
+      // 读取消息id
+      msg_id = byte;
+      packet.push_back(byte);
+      state = UnpackStatus::CHECK_LENGTH;
+      break;
+    }
+    case UnpackStatus::CHECK_LENGTH: {
+      // 读取消息长度
+      data_length = byte;
+      packet.push_back(byte);
+      state = UnpackStatus::GET_DATA;
+      break;
+    }
+    case UnpackStatus::GET_DATA: {
+      packet.push_back(byte);
+      if (packet.size() == 4 + data_length) {
+        // 收够数据了，进入check crc
+        state = UnpackStatus::CHECK_CRC;
+      }
+      break;
+    }
+    case UnpackStatus::CHECK_CRC: {
+      packet.push_back(byte);
+      if (packet.size() == 4 + data_length + 2) { // +2 = CRC
+        crc = (packet[4 + data_length] << 8) | packet[4 + data_length + 1];
+        if (checkCRC(packet.data(), 4 + data_length, crc)) {
+          state = UnpackStatus::CHECK_FOOTER;
+        } else {
+          // CRC 校验失败，丢弃数据包
+          state = UnpackStatus::CHECK_HEAD;
+        }
+      }
+      break;
+    }
+    case UnpackStatus::CHECK_FOOTER: {
+      // 读取消息尾
+      packet.push_back(byte);
+      if (packet.size() == 4 + data_length + 4) {
+        if (packet[packet.size() - 2] == 0xFD &&
+            packet[packet.size() - 1] == 0xFE) {
+          // 完整消息解析成功
+          processMessage(packet.data(), packet.size());
+        }
+        state = UnpackStatus::CHECK_HEAD;
+      }
+      break;
+    }
+    default:
+      state = UnpackStatus::CHECK_HEAD;
+      break;
+    }
+  }
+}
+
+// 根据id分发消息
+void SerialHW::processMessage(const uint8_t *data, size_t len) {
+  uint8_t msg_id = data[2];
+  const uint8_t *payload = data + 4;
+  size_t payload_len = len - 8;
+  switch (msg_id) {
+  case 0x00: {
+
+    break;
+  }
+  case 0x01: {
+
+    break;
+  }
+  case 0x02: {
+    // 状态标志位
+    std_msgs::Int8 msg;
+    board_action_ = *payload;
+    msg.data = board_action_;
+    action_pub_.publish(msg);
+    ROS_INFO_STREAM_THROTTLE(0.5, "receive the msg: " << msg.data);
+    break;
+  }
+  default:
+    break;
+  }
+}
+
+// 目前CRC实现为空
+bool SerialHW::checkCRC(const uint8_t *data, size_t len,
+                        uint16_t received_crc) {
+  return true;
+}
 
 } // namespace serial_hw

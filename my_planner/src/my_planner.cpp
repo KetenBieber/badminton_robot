@@ -1,3 +1,17 @@
+/**
+ * @file my_planner.cpp
+ * @author Keten (2863861004@qq.com)
+ * @brief
+ * @version 0.1
+ * @date 2026-01-31
+ *
+ * @copyright Copyright (c) 2026
+ *
+ * @attention :
+ * @note : TEMP 宏定义用于临时使用，现在还是需要跟踪到目标姿态
+ * @versioninfo :
+ */
+
 #include "my_planner/my_planner.h"
 
 PLUGINLIB_EXPORT_CLASS(my_planner::MyPlanner, nav_core::BaseLocalPlanner)
@@ -190,14 +204,16 @@ bool MyPlanner::computeVelocityCommands(geometry_msgs::Twist &cmd_vel) {
     {
       target_index_ = i;
       target_pose = pose_base;
-      ROS_WARN("Select the %d point as the temp target,dist: %.2f", i, dist);
+      ROS_WARN_THROTTLE(
+          0.5, "Select the %d point as the temp target,dist: %.2f", i, dist);
       break;
     }
 
     if (global_plan_.size() - 1 == i) // 如果已经到了最后一个点
     {
       target_pose = pose_base;
-      ROS_WARN("Select the %d point as the final target,dist: %.2f", i, dist);
+      ROS_WARN_THROTTLE(
+          0.5, "Select the %d point as the final target,dist: %.2f", i, dist);
     }
   }
 
@@ -229,16 +245,23 @@ bool MyPlanner::computeVelocityCommands(geometry_msgs::Twist &cmd_vel) {
   double final_dx = final_target_.pose.position.x - cur_odom.pose.position.x;
   double final_dy = final_target_.pose.position.y - cur_odom.pose.position.y;
 
+#ifndef TEMP
+
   double final_target_yaw = std::atan2(final_dy, final_dx);
   // 用 tf2::Quaternion 设置新的朝向（只改 yaw，roll/pitch 保持 0）
   tf2::Quaternion new_q;
   new_q.setRPY(0.0, 0.0, final_target_yaw); // 只设置 yaw
 
-  // 覆盖 target_pose 的 orientation
-  target_pose.pose.orientation.x = new_q.x();
-  target_pose.pose.orientation.y = new_q.y();
-  target_pose.pose.orientation.z = new_q.z();
-  target_pose.pose.orientation.w = new_q.w();
+#else
+
+  tf2::Quaternion tar_q(
+      final_target_.pose.orientation.x, final_target_.pose.orientation.y,
+      final_target_.pose.orientation.z, final_target_.pose.orientation.w);
+  double tar_roll, tar_pitch, tar_yaw;
+  tf2::Matrix3x3(tar_q).getRPY(tar_roll, tar_pitch, tar_yaw);
+  double final_target_yaw = tar_yaw;
+
+#endif
 
   double dist = sqrt(dx * dx + dy * dy);
 
@@ -252,6 +275,7 @@ bool MyPlanner::computeVelocityCommands(geometry_msgs::Twist &cmd_vel) {
 
   // 计算姿态差距
   double yaw_error = final_target_yaw - cur_yaw;
+
   yaw_error = atan2(sin(yaw_error), cos(yaw_error)); // 归一化到[-pi,pi]
 
   double v_x, v_y, v_yaw;
@@ -310,6 +334,9 @@ bool MyPlanner::isGoalReached() {
     linear_x_pid_->clearIntergral();
     linear_y_pid_->clearIntergral();
     angular_pid_->clearIntergral();
+
+    ROS_INFO_STREAM("REACH THE GOAL!");
+
     return true;
   }
 

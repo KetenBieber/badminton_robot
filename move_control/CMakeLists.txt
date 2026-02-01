@@ -27,6 +27,8 @@ find_package(catkin REQUIRED COMPONENTS
   nav_msgs
   visualization_msgs
   signal_handler
+  pcl_ros
+  pcl_conversions
 )
 
 add_message_files(
@@ -57,6 +59,8 @@ catkin_package(
   nav_msgs
   visualization_msgs
   signal_handler
+  pcl_ros
+  pcl_conversions
 
   # DEPENDS system_lib
 )
@@ -106,3 +110,11 @@ target_link_libraries(robot_fsm_node
   badminton_robot_fsm
   visualization
 )
+
+add_executable(pointcloud2_filter_node src/pointcloud2_filter_node.cpp)
+add_dependencies(pointcloud2_filter_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+target_link_libraries(pointcloud2_filter_node ${catkin_LIBRARIES})
+
+add_executable(test_fsm_node src/test_fsm_node.cpp)
+add_dependencies(test_fsm_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+target_link_libraries(test_fsm_node ${catkin_LIBRARIES})

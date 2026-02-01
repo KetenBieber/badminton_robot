@@ -6,6 +6,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+add_definitions(-DTEMP)
+
 find_package(catkin REQUIRED COMPONENTS
         nav_core
         pluginlib

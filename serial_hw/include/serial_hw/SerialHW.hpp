@@ -16,23 +16,39 @@
 
 #pragma once
 
+// clang-format off
+
+// ros origin package
 #include <XmlRpc.h>
-
 #include <geometry_msgs/Twist.h>
-#include <realtime_tools/realtime_buffer.h>
 #include <ros/ros.h>
+#include <std_msgs/Float32.h>
+#include <std_msgs/Int8.h>
+#include <sensor_msgs/Imu.h>
+#include <nav_msgs/Odometry.h>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Matrix3x3.h>
 
-#include <serial/serial.h>
-
-#include <any_node/ThreadedPublisher.hpp>
-#include <any_worker/Worker.hpp>
-#include <condition_variable>
+// other ros package
+#include <signal_handler/SignalHandler.hpp>
 #include <move_control/ActionMsg.h>
+#include <any_node/ThreadedPublisher.hpp>
+#include <serial_hw/Ringbuffer.h>
+
+
+// system
+#include <serial/serial.h>
+#include <thread>
 #include <mutex>
 #include <queue>
-#include <signal_handler/SignalHandler.hpp>
-#include <std_msgs/Float32.h>
-#include <thread>
+#include <condition_variable>
+#include <cstring>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/select.h>
+#include <errno.h>
+
+// clang-format on
 
 namespace serial_hw {
 
@@ -42,66 +58,84 @@ struct SerialMessage {
 };
 
 class SerialHW {
+
+  enum class UnpackStatus {
+    CHECK_HEAD = 0,
+    CHECK_ID = 1,
+    CHECK_LENGTH = 2,
+    GET_DATA = 3,
+    CHECK_CRC = 4,
+    CHECK_FOOTER
+  };
+
 public:
   SerialHW() = default;
-  ~SerialHW() = default;
+  ~SerialHW();
 
   bool init(ros::NodeHandle &nh);
   void read(const ros::Time &time);
 
   void sendThreadLoop();
+  void readThreadLoop();
+  void unpackThreadLoop();
+
   void cmdVelCallback(const geometry_msgs::Twist::ConstPtr &msg);
   void actionCallback(const move_control::ActionMsg::ConstPtr &msg);
   void deltaCallback(const std_msgs::Float32::ConstPtr &msg);
+  void imuCallback(const nav_msgs::Odometry::ConstPtr &msg);
 
   void handleSignal(int /* signum */);
 
 private:
-  // 目前不需要
-  void unpack();
+  void unpack(const uint8_t *buf, size_t len);
+  void processMessage(const uint8_t *data, size_t len);
 
-  // msg
-  union VEL_CMD {
-    uint8_t data[4];
-    float velData;
-  } vel_cmd_[3];      // 3个浮点数
-  uint8_t action_cmd; // 1个整数
-  union DELTA_DATA {
-    uint8_t data[4];
-    float delta;
-  } delta_data_;
+  bool checkCRC(const uint8_t *data, size_t len, uint16_t received_crc);
+
+  // receive msg
+  uint8_t board_action_; // 1个整数
 
   /* ros relative */
   ros::NodeHandle nh_;
   ros::Subscriber cmd_vel_sub_;
   ros::Subscriber action_sub_;
   ros::Subscriber delta_sub_;
-
-  /* worker relative */
-  std::shared_ptr<any_worker::Worker> send_worker_;
+  ros::Subscriber imu_sub_;
+  ros::Publisher action_pub_;
+  ros::Publisher imu_debug_pub_;
 
   /* thread relative */
   std::thread send_thread_;
   std::atomic<bool> is_running_{false};
+  std::thread read_thread_;
+  std::thread unpack_thread_;
 
   // 消息队列和同步工具
   std::queue<SerialMessage> cmd_vel_queue_;
   std::queue<SerialMessage> action_queue_;
   std::queue<SerialMessage> delta_queue_;
+  std::queue<SerialMessage> imu_queue_;
 
   std::mutex cmd_vel_mutex_;
   std::mutex action_mutex_;
   std::mutex delta_mutex_;
+  std::mutex imu_mutex_;
   std::mutex send_cv_mutex_;
+  std::mutex rb_mutex_;
 
   std::condition_variable msg_cv_;
+  std::condition_variable unpack_cv_;
 
   SerialMessage cmd_msg_;
   SerialMessage action_msg_;
   SerialMessage delta_msg_;
+  SerialMessage imu_msg_;
 
   /* serial relative */
   serial::Serial serial_{};
+
+  /* ringbuffer */
+  RingBuffer *rb_{nullptr};
 };
 
 } // namespace serial_hw

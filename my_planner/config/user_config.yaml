@@ -7,4 +7,4 @@ MyPlanner:
   angular_z_pid: { p: 4.0, i: 0.0, d: 0.5 }
   max_vel_x: 1.0
   yaw_threshold: 0.15 # 姿态矫正阈值，单位弧度
-  goal_reached_threshold: 5 # 配置在多少点前暂停 代价地图分辨率为0.05时，也就是5*0.05 = 0.25米的距离前就停下来
+  goal_reached_threshold: 0 # 配置在多少点前暂停 代价地图分辨率为0.05时，也就是5*0.05 = 0.25米的距离前就停下来

@@ -47,10 +47,17 @@ add_library(serial_hw
 target_link_libraries(serial_hw
   ${catkin_LIBRARIES}
 )
+add_library(ringbuffer
+  src/Ringbuffer.cpp
+)
+target_link_libraries(ringbuffer
+  ${catkin_LIBRARIES}
+)
 
 add_executable(serial_hw_node src/serial_hw_node.cpp)
 add_dependencies(serial_hw_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 target_link_libraries(serial_hw_node
   ${catkin_LIBRARIES}
   serial_hw
+  ringbuffer
 )

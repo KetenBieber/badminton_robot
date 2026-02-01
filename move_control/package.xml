@@ -40,6 +40,8 @@
   <depend>nav_msgs</depend>
   <depend>visualization_msgs</depend>
   <depend>signal_handler</depend>
+  <depend>pcl_ros</depend>
+  <depend>pcl_conversions</depend>
 
 
 </package>

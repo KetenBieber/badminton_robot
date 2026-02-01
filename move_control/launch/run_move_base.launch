@@ -2,7 +2,7 @@
 
     <!-- 边走边导航，不需要提供map -->
     
-    <node pkg="move_base" type="move_base" respawn="false" name="move_base" output="screen" clear_params="true" launch-prefix="gnome-terminal -x gdb --args">
+    <node pkg="move_base" type="move_base" respawn="false" name="move_base" output="screen" clear_params="true" >
         <rosparam file="$(find move_control)/config/move_base_config/costmap_common_params.yaml" command="load" ns="global_costmap" />
         <rosparam file="$(find move_control)/config/move_base_config/costmap_common_params.yaml" command="load" ns="local_costmap" />
         <rosparam file="$(find move_control)/config/move_base_config/local_costmap_params.yaml" command="load" />
